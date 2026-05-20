@@ -29,10 +29,33 @@ def preprocess(df):
     df.drop(columns=['Date_of_Journey'], inplace=True)
 
     def duration_to_minutes(value):
-        value = str(value).replace(' ', '')
-        parts = value.split('h')
-        hours = int(parts[0]) if parts[0] != '' else 0
-        mins = int(parts[1].replace('m', '')) if len(parts) > 1 and parts[1] != '' else 0
+        if pd.isna(value):
+            return np.nan
+        value = str(value).lower().strip()
+        hours = 0
+        mins = 0
+        if 'h' in value:
+            parts = value.split('h')
+            hours_part = parts[0].strip()
+            if hours_part != '':
+                try:
+                    hours = int(hours_part)
+                except ValueError:
+                    hours = 0
+            if len(parts) > 1 and parts[1].strip() != '':
+                mins_part = parts[1].replace('m', '').strip()
+                if mins_part != '':
+                    try:
+                        mins = int(mins_part)
+                    except ValueError:
+                        mins = 0
+        else:
+            if 'm' in value:
+                mins_part = value.replace('m', '').strip()
+                try:
+                    mins = int(mins_part)
+                except ValueError:
+                    mins = 0
         return hours * 60 + mins
 
     df['duration_mins'] = df['Duration'].apply(duration_to_minutes)
@@ -40,6 +63,7 @@ def preprocess(df):
 
     stops_map = {'non-stop': 0, '1 stop': 1, '2 stops': 2, '3 stops': 3, '4 stops': 4}
     df['total_stops'] = df['Total_Stops'].map(stops_map)
+    df['total_stops'] = df['total_stops'].fillna(-1)
     df.drop(columns=['Total_Stops'], inplace=True)
 
     features = [
