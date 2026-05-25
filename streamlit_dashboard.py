@@ -18,15 +18,16 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBRegressor
 
 st.set_page_config(
-    page_title="TCC — Previsão de Preços de Passagens",
+    page_title="Previsão de Passagens Aéreas — TCC",
     page_icon="✈️",
     layout="wide",
 )
 
-# ── Arquitetura LSTM ─────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# LSTM (deep learning)
+# ────────────────────────────────────────────────────────────────────────────
 
 class LSTMRegressor(nn.Module):
-    """Trata cada amostra tabular como sequência de 1 passo temporal."""
     def __init__(self, input_size, hidden_size=64, dropout=0.2):
         super().__init__()
         self.lstm    = nn.LSTM(input_size, hidden_size, batch_first=True)
@@ -42,7 +43,6 @@ class LSTMRegressor(nn.Module):
 
 
 class LSTMWrapper:
-    """Wrapper sklearn-compatível para o LSTMRegressor PyTorch."""
     def __init__(self, model: LSTMRegressor):
         self.model = model
 
@@ -56,7 +56,6 @@ class LSTMWrapper:
 def _fit_lstm(X_tr, y_tr, X_vl, y_vl,
               epochs=60, batch_size=64, lr=1e-3,
               hidden_size=64, dropout=0.2, patience=8):
-    """Treina o LSTM com early stopping e retorna um LSTMWrapper."""
     Xtr = torch.tensor(np.array(X_tr), dtype=torch.float32).unsqueeze(1)
     ytr = torch.tensor(np.array(y_tr), dtype=torch.float32)
     Xvl = torch.tensor(np.array(X_vl), dtype=torch.float32).unsqueeze(1)
@@ -90,7 +89,9 @@ def _fit_lstm(X_tr, y_tr, X_vl, y_vl,
     return LSTMWrapper(model)
 
 
-# ── Helpers de pré-processamento ────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# PRÉ-PROCESSAMENTO
+# ────────────────────────────────────────────────────────────────────────────
 
 def _duration_to_minutes(s):
     s = str(s).strip()
@@ -116,7 +117,6 @@ def _time_col_to_minutes(series):
         mins.append(int(m.group(1)) * 60 + int(m.group(2)) if m else np.nan)
     return mins
 
-# ── Carregamento e pré-processamento ────────────────────────────────────────
 
 @st.cache_data
 def load_raw(path):
@@ -145,16 +145,12 @@ def preprocess(df_raw, remove_outliers=True):
         cap = df["Price"].quantile(0.99)
         df = df[df["Price"] <= cap].copy()
 
-    features = [
-        "Airline", "Source", "Destination", "Additional_Info",
-        "journey_day", "journey_month", "duration_mins", "total_stops",
-        "dep_time_mins", "arrival_time_mins",
-    ]
+    features         = ["Airline", "Source", "Destination", "Additional_Info",
+                        "journey_day", "journey_month", "duration_mins", "total_stops",
+                        "dep_time_mins", "arrival_time_mins"]
     categorical_cols = ["Airline", "Source", "Destination", "Additional_Info"]
-    numeric_cols     = [
-        "journey_day", "journey_month", "duration_mins", "total_stops",
-        "dep_time_mins", "arrival_time_mins",
-    ]
+    numeric_cols     = ["journey_day", "journey_month", "duration_mins", "total_stops",
+                        "dep_time_mins", "arrival_time_mins"]
 
     X = df[features]
     y = pd.to_numeric(df["Price"], errors="coerce") if "Price" in df.columns else None
@@ -175,7 +171,6 @@ def preprocess(df_raw, remove_outliers=True):
         ("num", numeric_transformer, numeric_cols),
         ("cat", categorical_transformer, categorical_cols),
     ])
-
     X_proc = preprocessor.fit_transform(X)
 
     try:
@@ -202,111 +197,174 @@ def preprocess_test(df_test_raw, _preprocessor, features):
     df.drop(columns=["Dep_Time", "Arrival_Time"], inplace=True)
     return _preprocessor.transform(df[features])
 
-# PyTorch models can't be pickled by cache_data — use cache_resource
 @st.cache_resource
-def train_one(model_name, _params_key, n_estimators, max_depth, learning_rate, subsample,
-              lstm_epochs, lstm_hidden, _X_train, _y_train, _X_valid, _y_valid):
-    """Treina um único modelo com os hiperparâmetros fornecidos."""
+def train_one(model_name, _params_key, n_estimators, max_depth_val, learning_rate,
+              subsample, lstm_epochs, lstm_hidden, _X_train, _y_train, _X_valid, _y_valid):
     if model_name == "Random Forest":
         m = RandomForestRegressor(
             n_estimators=n_estimators,
-            max_depth=max_depth if max_depth != 0 else None,
+            max_depth=max_depth_val if max_depth_val != 0 else None,
             random_state=42, n_jobs=-1,
         )
         m.fit(_X_train, _y_train)
         return m
     elif model_name == "XGBoost":
         m = XGBRegressor(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            learning_rate=learning_rate,
-            subsample=subsample,
+            n_estimators=n_estimators, max_depth=max_depth_val,
+            learning_rate=learning_rate, subsample=subsample,
             random_state=42, n_jobs=-1, verbosity=0,
         )
         m.fit(_X_train, _y_train)
         return m
-    else:  # LSTM
-        return _fit_lstm(
-            _X_train, _y_train, _X_valid, _y_valid,
-            epochs=lstm_epochs, hidden_size=lstm_hidden,
-        )
+    else:
+        return _fit_lstm(_X_train, _y_train, _X_valid, _y_valid,
+                         epochs=lstm_epochs, hidden_size=lstm_hidden)
 
 @st.cache_resource
 def train_all_baseline(_X_train, _y_train, _X_valid, _y_valid):
-    """Treina os três modelos com parâmetros padrão para comparação baseline."""
-    results = {}
-
     rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
     rf.fit(_X_train, _y_train)
-    results["Random Forest"] = rf
-
     xgb = XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1, verbosity=0)
     xgb.fit(_X_train, _y_train)
-    results["XGBoost"] = xgb
+    lstm = _fit_lstm(_X_train, _y_train, _X_valid, _y_valid, epochs=60, hidden_size=64)
+    return {"Random Forest": rf, "XGBoost": xgb, "Rede Neural (LSTM)": lstm}
 
-    results["LSTM"] = _fit_lstm(_X_train, _y_train, _X_valid, _y_valid,
-                                epochs=60, hidden_size=64)
-    return results
 
 # ════════════════════════════════════════════════════════════════════════════
-# UI
+# CABEÇALHO PRINCIPAL
 # ════════════════════════════════════════════════════════════════════════════
 
-st.title("✈️ Previsão de Preços de Passagens Aéreas")
-st.caption("TCC — Comparação de Modelos de Machine Learning  |  Dataset: voos domésticos na Índia")
+st.title("✈️ Quanto custa uma passagem aérea na Índia?")
+st.markdown(
+    "Este painel foi desenvolvido como **Trabalho de Conclusão de Curso** e mostra como "
+    "um computador pode **aprender** a prever o preço de passagens aéreas a partir de "
+    "informações como companhia, horário, duração e número de escalas do voo."
+)
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+with st.expander("📖 Como funciona esse projeto? (clique para entender)"):
+    st.markdown("""
+    **O que é Machine Learning?**
+    É uma técnica onde ensinamos o computador a resolver um problema mostrando muitos exemplos.
+    Aqui, mostramos milhares de voos com seus preços reais — e o computador aprende
+    os padrões que fazem um voo ser mais caro ou mais barato.
+
+    **O que o computador aprende?**
+    Por exemplo: voos com mais escalas tendem a ser mais caros; certas companhias
+    cobram mais; voos à noite têm preços diferentes dos diurnos. O modelo aprende
+    tudo isso sozinho, olhando os dados.
+
+    **Como sabemos se ele aprendeu bem?**
+    Separamos uma parte dos dados que o computador **nunca viu** durante o treino.
+    Depois pedimos que ele preveja os preços dessa parte e comparamos com os valores reais.
+    Quanto menor o erro, melhor o modelo aprendeu.
+
+    **Os três modelos testados:**
+    - 🌳 **Random Forest:** como um júri com centenas de especialistas votando juntos — cada "árvore" dá um palpite e a maioria vence.
+    - ⚡ **XGBoost:** aprende com os próprios erros, como um atleta que treina focando nas fraquezas. Campeão em competições de dados.
+    - 🧠 **Rede Neural (LSTM):** inspirado no cérebro humano, aprende padrões complexos entre as informações do voo.
+    """)
+
+st.divider()
+
+# ── BARRA LATERAL ────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Configurações")
 
-    train_path = st.text_input("Arquivo de treino", "Data_Train.xlsx")
-    test_path  = st.text_input("Arquivo de teste",  "Test_set.xlsx")
+    st.markdown("**Arquivos de dados**")
+    train_path = st.text_input("Dados de treino", "Data_Train.xlsx")
+    test_path  = st.text_input("Dados de teste",  "Test_set.xlsx")
 
     st.divider()
-    st.subheader("Divisão treino / validação")
-    test_size = st.slider("Tamanho da validação (%)", 10, 40, 20, step=5)
+
+    st.markdown("**Quanto dos dados reservar para o teste?**")
+    st.caption("Esses dados ficam escondidos do modelo durante o treino — servem só para medir o erro no final.")
+    test_size = st.slider("Percentual de teste", 10, 40, 20, step=5,
+                          help="20% = o modelo aprende com 80% dos voos e é testado nos 20% restantes.")
 
     st.divider()
-    st.subheader("Modelo para explorar")
-    model_choice = st.selectbox("Algoritmo", ["Random Forest", "XGBoost", "LSTM"])
 
-    st.markdown("**Hiperparâmetros**")
-    # defaults so all vars are always defined
+    st.markdown("**Escolha um modelo para explorar**")
+    model_labels = {
+        "Random Forest":      "🌳 Random Forest",
+        "XGBoost":            "⚡ XGBoost",
+        "Rede Neural (LSTM)": "🧠 Rede Neural (LSTM)",
+    }
+    model_choice = st.selectbox(
+        "Modelo",
+        list(model_labels.keys()),
+        format_func=lambda x: model_labels[x],
+    )
+
+    st.markdown("**Ajustes avançados do modelo**")
+    st.caption("Você pode experimentar diferentes configurações e ver como o resultado muda.")
+
     n_estimators  = 100
-    max_depth_val = 0       # 0 → None for RF
+    max_depth_val = 0
     learning_rate = 0.1
     subsample     = 0.9
     lstm_epochs   = 60
     lstm_hidden   = 64
 
     if model_choice == "Random Forest":
-        n_estimators  = st.slider("n_estimators", 50, 300, 100, step=50)
-        rf_depth_sel  = st.select_slider("max_depth", options=["None", 5, 10, 20, 30])
-        max_depth_val = 0 if rf_depth_sel == "None" else int(rf_depth_sel)
-    elif model_choice == "XGBoost":
-        n_estimators  = st.slider("n_estimators", 50, 400, 100, step=50)
-        max_depth_val = st.select_slider("max_depth",     options=[3, 5, 7, 9])
-        learning_rate = st.select_slider("learning_rate", options=[0.01, 0.05, 0.1, 0.2])
-        subsample     = st.select_slider("subsample",     options=[0.7, 0.8, 0.9, 1.0])
-    else:  # LSTM
-        lstm_epochs = st.slider("Épocas (máx)", 20, 120, 60, step=10)
-        lstm_hidden = st.select_slider("Neurônios LSTM", options=[32, 64, 128])
+        n_estimators = st.slider(
+            "Número de 'especialistas' (árvores)",
+            50, 300, 100, step=50,
+            help="Mais árvores = mais preciso, mas mais lento.",
+        )
+        rf_depth_sel  = st.select_slider(
+            "Profundidade máxima de raciocínio",
+            options=["Sem limite", 5, 10, 20, 30],
+            help="Quanto mais profundo, mais detalhe cada árvore analisa.",
+        )
+        max_depth_val = 0 if rf_depth_sel == "Sem limite" else int(rf_depth_sel)
 
-    # Unique key for cache_resource (represents all hyperparams as a tuple)
+    elif model_choice == "XGBoost":
+        n_estimators = st.slider(
+            "Número de rodadas de aprendizado",
+            50, 400, 100, step=50,
+            help="Mais rodadas = aprende mais, mas pode 'decorar' demais.",
+        )
+        max_depth_val = st.select_slider(
+            "Profundidade de análise por rodada",
+            options=[3, 5, 7, 9],
+            help="Valores menores = aprendizado mais geral.",
+        )
+        learning_rate = st.select_slider(
+            "Velocidade de aprendizado",
+            options=[0.01, 0.05, 0.1, 0.2],
+            help="Velocidades menores são mais cuidadosas e geralmente melhores.",
+        )
+        subsample = st.select_slider(
+            "Fração dos dados por rodada",
+            options=[0.7, 0.8, 0.9, 1.0],
+            help="Usar menos dados por rodada ajuda a não decorar os exemplos.",
+        )
+
+    else:  # LSTM
+        lstm_epochs = st.slider(
+            "Quantas vezes a rede estuda os dados",
+            20, 120, 60, step=10,
+            help="A rede para antes se perceber que parou de melhorar (early stopping).",
+        )
+        lstm_hidden = st.select_slider(
+            "Tamanho da memória da rede",
+            options=[32, 64, 128],
+            help="Redes maiores capturam padrões mais complexos, mas precisam de mais dados.",
+        )
+
     params_key = (model_choice, n_estimators, max_depth_val, learning_rate,
                   subsample, lstm_epochs, lstm_hidden)
 
-# ── Carregar dados ────────────────────────────────────────────────────────────
+# ── CARREGAR DADOS ────────────────────────────────────────────────────────────
 try:
     raw_df = load_raw(train_path)
 except Exception as e:
-    st.error(f"Erro ao carregar {train_path}: {e}")
+    st.error(f"❌ Não foi possível abrir o arquivo '{train_path}'. Verifique o nome e tente novamente.")
     st.stop()
 
 X, y, preprocessor, features, feature_names, df_proc = preprocess(raw_df)
 mask  = y.notna()
 X, y  = X[mask], y[mask]
-
 X_train, X_valid, y_train, y_valid = train_test_split(
     X, y, test_size=test_size / 100, random_state=42
 )
@@ -315,71 +373,138 @@ X_train, X_valid, y_train, y_valid = train_test_split(
 # ABAS
 # ════════════════════════════════════════════════════════════════════════════
 tab_eda, tab_models, tab_explore, tab_importance, tab_test = st.tabs([
-    "📊 EDA",
-    "🏆 Comparação de Modelos",
-    "🔬 Explorar Modelo",
-    "📌 Importância de Features",
-    "🎯 Previsões no Test Set",
+    "📊 Conhecendo os Dados",
+    "🏆 Qual modelo é melhor?",
+    "🔬 Experimentar um Modelo",
+    "📌 O que influencia o preço?",
+    "🎯 Prever Preços Novos",
 ])
 
-# ── ABA 1: EDA ───────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# ABA 1 — CONHECENDO OS DADOS
+# ════════════════════════════════════════════════════════════════════════════
 with tab_eda:
-    st.header("Análise Exploratória de Dados")
+    st.header("📊 Conhecendo os Dados")
+    st.markdown(
+        "Antes de ensinar qualquer coisa ao computador, precisamos entender os dados. "
+        "Aqui exploramos os **10.683 voos domésticos na Índia** que usamos no projeto."
+    )
 
+    # ── Números rápidos ──────────────────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Registros (treino)", f"{len(raw_df):,}")
-    c2.metric("Após remoção de outliers", f"{len(df_proc):,}")
-    c3.metric("Preço médio (INR)", f"{df_proc['Price'].mean():,.0f}")
-    c4.metric("Preço mediano (INR)", f"{df_proc['Price'].median():,.0f}")
+    c1.metric("✈️ Voos no dataset", f"{len(raw_df):,}")
+    c2.metric("✅ Voos usados no treino", f"{len(df_proc):,}",
+              delta=f"−{len(raw_df) - len(df_proc)} outliers removidos",
+              delta_color="off")
+    c3.metric("💰 Preço médio", f"₹ {df_proc['Price'].mean():,.0f}",
+              help="Em rúpias indianas (INR). 1 INR ≈ R$ 0,06.")
+    c4.metric("📍 Preço mediano", f"₹ {df_proc['Price'].median():,.0f}",
+              help="Metade dos voos custa menos que esse valor.")
+
+    st.info(
+        "💡 **O que é um outlier?** São voos com preços absurdamente altos (acima de ₹35.000) "
+        "que poderiam confundir o modelo — como tentar aprender o preço de um carro popular "
+        "incluindo Ferraris na conta. Removemos o 1% mais caro para o modelo aprender melhor."
+    )
 
     st.divider()
 
+    # ── Distribuição de preços ───────────────────────────────────────────────
+    cap = raw_df["Price"].quantile(0.99)
+    df_eda = raw_df[raw_df["Price"] <= cap].copy()
+
     col_a, col_b = st.columns(2)
+
     with col_a:
-        st.subheader("Distribuição de Price")
-        cap = raw_df["Price"].quantile(0.99)
+        st.subheader("Como os preços se distribuem?")
+        st.caption("Cada barra mostra quantos voos têm aquele faixa de preço.")
         fig_hist = px.histogram(
-            raw_df[raw_df["Price"] <= cap], x="Price", nbins=60,
-            color_discrete_sequence=["steelblue"],
-            labels={"Price": "Preço (INR)"},
+            df_eda, x="Price", nbins=60,
+            color_discrete_sequence=["#4C9BE8"],
+            labels={"Price": "Preço (₹)", "count": "Nº de voos"},
         )
-        fig_hist.update_layout(showlegend=False, margin=dict(t=20))
+        fig_hist.update_layout(showlegend=False, margin=dict(t=10),
+                                yaxis_title="Número de voos")
         st.plotly_chart(fig_hist, use_container_width=True)
-        st.caption(f"Outliers removidos: {(raw_df['Price'] > cap).sum()} registros com Price > {cap:,.0f} INR (top 1%)")
+        st.caption(
+            "📌 A maioria dos voos custa entre ₹4.000 e ₹12.000. "
+            "Poucos voos muito caros foram removidos da análise."
+        )
 
     with col_b:
-        st.subheader("Preço por Número de Paradas")
+        st.subheader("Escalas encarecem o voo?")
+        st.caption("Cada caixa mostra a faixa de preços para aquele número de paradas.")
         stop_order  = ["non-stop", "1 stop", "2 stops", "3 stops", "4 stops"]
         valid_stops = [s for s in stop_order if s in raw_df["Total_Stops"].dropna().unique()]
-        df_eda = raw_df[raw_df["Price"] <= cap].copy()
+        stop_labels = {
+            "non-stop": "Direto", "1 stop": "1 escala",
+            "2 stops": "2 escalas", "3 stops": "3 escalas", "4 stops": "4 escalas",
+        }
+        df_eda_stops = df_eda.copy()
+        df_eda_stops["Paradas"] = df_eda_stops["Total_Stops"].map(stop_labels).fillna(df_eda_stops["Total_Stops"])
+        stop_labels_ordered = [stop_labels.get(s, s) for s in valid_stops]
         fig_stops = px.box(
-            df_eda, x="Total_Stops", y="Price",
-            category_orders={"Total_Stops": valid_stops},
-            color="Total_Stops",
-            labels={"Total_Stops": "Paradas", "Price": "Preço (INR)"},
+            df_eda_stops, x="Paradas", y="Price",
+            category_orders={"Paradas": stop_labels_ordered},
+            color="Paradas",
+            labels={"Price": "Preço (₹)"},
+            color_discrete_sequence=px.colors.qualitative.Set2,
         )
-        fig_stops.update_layout(showlegend=False, margin=dict(t=20))
+        fig_stops.update_layout(showlegend=False, margin=dict(t=10))
         st.plotly_chart(fig_stops, use_container_width=True)
+        st.caption(
+            "📌 Sim! Voos com mais escalas tendem a custar mais. "
+            "A linha no meio de cada caixa é o preço do 'voo típico'."
+        )
 
-    st.subheader("Preço por Companhia Aérea")
+    # ── Preço por companhia ──────────────────────────────────────────────────
+    st.subheader("Qual companhia é mais cara?")
+    st.caption("As companhias estão ordenadas da mais cara para a mais barata (pelo preço mediano).")
     airline_order = df_eda.groupby("Airline")["Price"].median().sort_values(ascending=False).index.tolist()
     fig_airline = px.box(
-        df_eda, x="Airline", y="Price", category_orders={"Airline": airline_order},
+        df_eda, x="Airline", y="Price",
+        category_orders={"Airline": airline_order},
         color="Airline",
-        labels={"Airline": "Companhia", "Price": "Preço (INR)"},
+        labels={"Airline": "Companhia", "Price": "Preço (₹)"},
+        color_discrete_sequence=px.colors.qualitative.Pastel,
     )
-    fig_airline.update_layout(showlegend=False, xaxis_tickangle=-35, margin=dict(t=20))
+    fig_airline.update_layout(showlegend=False, xaxis_tickangle=-30, margin=dict(t=10))
     st.plotly_chart(fig_airline, use_container_width=True)
+    st.caption(
+        "📌 Jet Airways e Air India cobram mais (companhias premium). "
+        "IndiGo, SpiceJet e GoAir são mais baratas (modelo low-cost)."
+    )
 
-    st.subheader("Amostra dos dados")
-    st.dataframe(raw_df.head(8), use_container_width=True)
+    # ── Amostra dos dados ────────────────────────────────────────────────────
+    with st.expander("🔍 Ver os dados brutos (primeiras 8 linhas)"):
+        st.caption("Esses são os dados exatamente como vieram — o computador precisou transformar tudo isso em números para aprender.")
+        st.dataframe(raw_df.head(8), use_container_width=True)
 
-# ── ABA 2: Comparação de Modelos ─────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════════════════
+# ABA 2 — QUAL MODELO É MELHOR?
+# ════════════════════════════════════════════════════════════════════════════
 with tab_models:
-    st.header("Comparação de Modelos — Baseline")
-    st.caption("Random Forest e XGBoost com n_estimators=100; LSTM com 60 épocas e early stopping. Avaliados no conjunto de validação.")
+    st.header("🏆 Qual modelo aprende melhor?")
+    st.markdown(
+        "Treinamos **três modelos diferentes** com os mesmos dados e comparamos "
+        "quem erra menos ao prever preços que nunca viu antes."
+    )
 
-    with st.spinner("Treinando os três modelos (LSTM pode levar ~30 s)..."):
+    with st.expander("🤔 Como medir se um modelo é bom?"):
+        st.markdown("""
+        Usamos duas medidas:
+
+        **Erro médio (RMSE):** Em média, quantas rúpias o modelo erra por voo.
+        → Se o erro médio é ₹1.500, significa que a previsão fica a ~₹1.500 do preço real.
+        → **Quanto menor, melhor.**
+
+        **Precisão (R²):** Que porcentagem da variação de preços o modelo consegue explicar.
+        → 0,85 significa que o modelo captura 85% dos fatores que fazem um voo ser caro ou barato.
+        → **Quanto mais próximo de 1,0 (100%), melhor.**
+        """)
+
+    with st.spinner("⏳ Treinando os três modelos... A rede neural pode levar ~30 segundos."):
         baseline_models = train_all_baseline(X_train, y_train, X_valid, y_valid)
 
     rows = []
@@ -387,42 +512,76 @@ with tab_models:
         preds = mdl.predict(X_valid)
         rmse  = np.sqrt(mean_squared_error(y_valid, preds))
         r2    = r2_score(y_valid, preds)
-        rows.append({"Modelo": name, "RMSE (INR)": round(rmse, 2), "R²": round(r2, 4)})
+        rows.append({
+            "Modelo": name,
+            "Erro médio por voo": f"₹ {rmse:,.0f}",
+            "Precisão (R²)": f"{r2:.1%}",
+            "_rmse": rmse,
+            "_r2": r2,
+        })
 
-    results_df = pd.DataFrame(rows).sort_values("RMSE (INR)").reset_index(drop=True)
+    results_df = pd.DataFrame(rows).sort_values("_rmse").reset_index(drop=True)
 
+    # ── Pódio ────────────────────────────────────────────────────────────────
+    best_row = results_df.iloc[0]
+    st.success(
+        f"🥇 **Melhor modelo: {best_row['Modelo']}** — "
+        f"erra em média **{best_row['Erro médio por voo']}** por voo "
+        f"e tem precisão de **{best_row['Precisão (R²)']}**."
+    )
+
+    # ── Gráficos ─────────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
+        st.subheader("Erro médio por modelo")
+        st.caption("Barra menor = modelo mais preciso ✅")
         fig_rmse = px.bar(
-            results_df, x="Modelo", y="RMSE (INR)", color="Modelo",
-            title="RMSE por modelo (menor = melhor)",
+            results_df, x="Modelo", y="_rmse", color="Modelo",
             color_discrete_sequence=px.colors.qualitative.Set2,
+            labels={"_rmse": "Erro médio (₹)", "Modelo": ""},
+            text=results_df["Erro médio por voo"],
         )
-        fig_rmse.update_layout(showlegend=False)
+        fig_rmse.update_traces(textposition="outside")
+        fig_rmse.update_layout(showlegend=False, margin=dict(t=10))
         st.plotly_chart(fig_rmse, use_container_width=True)
+
     with c2:
+        st.subheader("Precisão de cada modelo")
+        st.caption("Barra maior = modelo mais preciso ✅")
         fig_r2 = px.bar(
-            results_df, x="Modelo", y="R²", color="Modelo",
-            title="R² por modelo (maior = melhor)",
+            results_df, x="Modelo", y="_r2", color="Modelo",
             color_discrete_sequence=px.colors.qualitative.Set2,
+            labels={"_r2": "Precisão (R²)", "Modelo": ""},
+            text=results_df["Precisão (R²)"],
         )
-        fig_r2.update_layout(showlegend=False)
+        fig_r2.update_traces(textposition="outside")
+        fig_r2.update_layout(showlegend=False, yaxis_tickformat=".0%", margin=dict(t=10))
         st.plotly_chart(fig_r2, use_container_width=True)
 
-    st.subheader("Tabela de resultados")
-    st.dataframe(results_df.style.highlight_min("RMSE (INR)", color="#d4edda")
-                                  .highlight_max("R²",         color="#d4edda"),
-                 use_container_width=True)
+    # ── Tabela resumo ─────────────────────────────────────────────────────────
+    st.subheader("Resumo dos resultados")
+    st.dataframe(
+        results_df[["Modelo", "Erro médio por voo", "Precisão (R²)"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "⚠️ Esses resultados usam configurações padrão (sem ajuste fino). "
+        "Na aba '🔬 Experimentar', você pode ajustar os parâmetros e ver se consegue melhorar."
+    )
 
-    best = results_df.iloc[0]["Modelo"]
-    st.success(f"**Melhor modelo baseline:** {best} — RMSE: {results_df.iloc[0]['RMSE (INR)']:,.2f} INR  |  R²: {results_df.iloc[0]['R²']:.4f}")
 
-# ── ABA 3: Explorar Modelo ───────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# ABA 3 — EXPERIMENTAR UM MODELO
+# ════════════════════════════════════════════════════════════════════════════
 with tab_explore:
-    st.header(f"Explorar: {model_choice}")
-    st.caption("Ajuste os hiperparâmetros na barra lateral e veja o impacto nas métricas.")
+    st.header(f"🔬 Experimentando: {model_labels[model_choice]}")
+    st.markdown(
+        "Use os controles na **barra lateral esquerda** para ajustar as configurações do modelo "
+        "e veja aqui como o desempenho muda. É como afinar um instrumento musical!"
+    )
 
-    with st.spinner(f"Treinando {model_choice}..."):
+    with st.spinner(f"⏳ Treinando {model_labels[model_choice]}..."):
         model = train_one(
             model_choice, str(params_key),
             n_estimators, max_depth_val, learning_rate, subsample,
@@ -435,52 +594,81 @@ with tab_explore:
     r2    = r2_score(y_valid, preds)
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("RMSE", f"{rmse:,.2f} INR")
-    m2.metric("R²",   f"{r2:.4f}")
-    m3.metric("Registros validação", f"{len(y_valid):,}")
+    m1.metric(
+        "💸 Erro médio por voo", f"₹ {rmse:,.0f}",
+        help="Em média, o modelo erra esse valor ao prever o preço de um voo.",
+    )
+    m2.metric(
+        "🎯 Precisão do modelo", f"{r2:.1%}",
+        help="Quanto das variações de preço o modelo consegue explicar.",
+    )
+    m3.metric("📋 Voos testados", f"{len(y_valid):,}",
+              help="Número de voos usados para medir o erro (nunca vistos pelo modelo).")
 
     st.divider()
+
     col1, col2 = st.columns(2)
+
     with col1:
-        st.subheader("Real vs. Previsto")
+        st.subheader("Preço previsto × Preço real")
+        st.caption(
+            "Cada ponto é um voo. Se o ponto estiver na linha vermelha, "
+            "a previsão foi perfeita. Pontos longe da linha = erros maiores."
+        )
         fig_scatter = px.scatter(
             x=y_valid, y=preds,
-            labels={"x": "Preço real (INR)", "y": "Preço previsto (INR)"},
-            opacity=0.5, color_discrete_sequence=["steelblue"],
+            labels={"x": "Preço real (₹)", "y": "Preço previsto (₹)"},
+            opacity=0.4,
+            color_discrete_sequence=["#4C9BE8"],
         )
         fig_scatter.add_shape(
             type="line",
             x0=float(y_valid.min()), y0=float(y_valid.min()),
             x1=float(y_valid.max()), y1=float(y_valid.max()),
-            line=dict(color="red", dash="dash"),
+            line=dict(color="red", dash="dash", width=2),
         )
-        fig_scatter.update_layout(margin=dict(t=20))
+        fig_scatter.update_layout(margin=dict(t=10))
         st.plotly_chart(fig_scatter, use_container_width=True)
-        st.caption("Pontos na linha diagonal = previsão perfeita. Dispersão indica o erro do modelo.")
 
     with col2:
-        st.subheader("Distribuição dos Resíduos")
+        st.subheader("O modelo tem tendência a errar para algum lado?")
+        st.caption(
+            "Este gráfico mostra a diferença entre o preço real e o previsto. "
+            "Centrado no zero = o modelo não favorece nem preços altos nem baixos."
+        )
         residuals = np.array(y_valid) - preds
         fig_res = px.histogram(
             residuals, nbins=50,
-            labels={"value": "Resíduo (real − previsto)", "count": "Frequência"},
-            color_discrete_sequence=["steelblue"],
+            labels={"value": "Diferença (real − previsto em ₹)", "count": "Nº de voos"},
+            color_discrete_sequence=["#4C9BE8"],
         )
-        fig_res.add_vline(x=0, line_dash="dash", line_color="red")
-        fig_res.update_layout(showlegend=False, margin=dict(t=20))
+        fig_res.add_vline(x=0, line_dash="dash", line_color="red", line_width=2)
+        fig_res.update_layout(showlegend=False, margin=dict(t=10))
         st.plotly_chart(fig_res, use_container_width=True)
-        st.caption("Distribuição centrada em zero indica ausência de viés sistemático.")
 
-# ── ABA 4: Importância de Features ───────────────────────────────────────────
+    st.info(
+        "💡 **Como interpretar:** Um bom modelo tem os pontos perto da linha vermelha "
+        "e a distribuição de erros centrada em zero. Se estiver torta para um lado, "
+        "o modelo sistematicamente subestima ou superestima os preços."
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ABA 4 — O QUE INFLUENCIA O PREÇO?
+# ════════════════════════════════════════════════════════════════════════════
 with tab_importance:
-    st.header("Importância de Features")
-    st.caption("Calculada sobre o modelo selecionado na barra lateral (apenas RF e XGBoost fornecem importâncias diretas).")
+    st.header("📌 O que mais influencia o preço da passagem?")
+    st.markdown(
+        "Alguns modelos conseguem nos dizer **quais informações foram mais importantes** "
+        "para chegar no preço previsto. Isso ajuda a entender a lógica por trás das previsões."
+    )
 
-    if model_choice not in ("Random Forest", "XGBoost"):
-        st.info(
-            "O modelo **LSTM** não expõe importâncias diretas de features — a rede aprende "
-            "representações internas distribuídas entre todos os pesos. Selecione "
-            "**Random Forest** ou **XGBoost** na barra lateral para visualizar a importância."
+    if model_choice == "Rede Neural (LSTM)":
+        st.warning(
+            "🧠 A **Rede Neural** aprende de forma distribuída — os fatores importantes ficam "
+            "espalhados por milhares de conexões internas, tornando difícil identificar um único "
+            "fator mais importante. Selecione **Random Forest** ou **XGBoost** na barra "
+            "lateral para ver quais informações mais influenciaram o modelo."
         )
     else:
         with st.spinner("Calculando importâncias..."):
@@ -492,76 +680,140 @@ with tab_importance:
             )
             importances = model_fi.feature_importances_
 
-        top_n = st.slider("Número de features exibidas", 10, 30, 15)
+        # Nomes amigáveis para as features principais
+        friendly_names = {
+            "duration_mins":      "⏱️ Duração do voo",
+            "total_stops":        "🔄 Nº de escalas",
+            "dep_time_mins":      "🌅 Horário de partida",
+            "arrival_time_mins":  "🌆 Horário de chegada",
+            "journey_day":        "📅 Dia da viagem",
+            "journey_month":      "🗓️ Mês da viagem",
+        }
+        def friendly(name):
+            for key, label in friendly_names.items():
+                if name == key:
+                    return label
+            if name.startswith("Airline_"):
+                return f"✈️ Companhia: {name.replace('Airline_','')}"
+            if name.startswith("Source_"):
+                return f"🛫 Origem: {name.replace('Source_','')}"
+            if name.startswith("Destination_"):
+                return f"🛬 Destino: {name.replace('Destination_','')}"
+            if name.startswith("Additional_Info_"):
+                return f"ℹ️ Info: {name.replace('Additional_Info_','')}"
+            return name
+
+        top_n = st.slider("Quantos fatores exibir?", 5, 20, 12)
         top_idx   = np.argsort(importances)[-top_n:]
-        top_names = [feature_names[i] for i in top_idx]
+        top_names = [friendly(feature_names[i]) for i in top_idx]
         top_vals  = importances[top_idx]
 
         fig_fi = go.Figure(go.Bar(
-            x=top_vals, y=top_names, orientation="h",
-            marker_color="steelblue",
+            x=top_vals,
+            y=top_names,
+            orientation="h",
+            marker_color="#4C9BE8",
+            text=[f"{v:.1%}" for v in top_vals],
+            textposition="outside",
         ))
         fig_fi.update_layout(
-            title=f"Top {top_n} features — {model_choice}",
+            title=f"Fatores que mais influenciam o preço — {model_labels[model_choice]}",
             xaxis_title="Importância relativa",
+            xaxis_tickformat=".0%",
             yaxis_title="",
-            margin=dict(t=40),
-            height=max(400, top_n * 28),
+            margin=dict(t=50, l=200),
+            height=max(400, top_n * 35),
         )
         st.plotly_chart(fig_fi, use_container_width=True)
-        st.caption("Barras maiores = feature com maior influência nas previsões do modelo.")
 
-        with st.expander("Ver tabela completa"):
+        st.info(
+            "💡 **Como ler este gráfico:** A barra maior indica o fator que mais influenciou "
+            "as previsões do modelo. Por exemplo, se 'Duração do voo' tem a maior barra, "
+            "significa que voos mais longos/curtos causam a maior variação de preço."
+        )
+
+        with st.expander("📋 Ver todos os fatores em tabela"):
             fi_df = pd.DataFrame({
-                "Feature":    [feature_names[i] for i in np.argsort(importances)[::-1]],
-                "Importância": sorted(importances, reverse=True),
+                "Fator":      [friendly(feature_names[i]) for i in np.argsort(importances)[::-1]],
+                "Importância": [f"{v:.2%}" for v in sorted(importances, reverse=True)],
             })
-            st.dataframe(fi_df, use_container_width=True)
+            st.dataframe(fi_df, use_container_width=True, hide_index=True)
 
-# ── ABA 5: Previsões no Test Set ─────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════════════════
+# ABA 5 — PREVER PREÇOS NOVOS
+# ════════════════════════════════════════════════════════════════════════════
 with tab_test:
-    st.header("Previsões no Conjunto de Teste")
-    st.caption(f"Usando o melhor modelo baseline treinado na aba anterior. Arquivo: `{test_path}`")
+    st.header("🎯 Prever preços de voos desconhecidos")
+    st.markdown(
+        "Aqui usamos o **melhor modelo** para prever o preço de **2.671 voos** "
+        "do conjunto de teste — voos que o modelo nunca viu e que não têm o preço real registrado."
+    )
+
+    st.info(
+        "💡 **Por que existe um conjunto de teste separado?** "
+        "Para simular o uso real: na prática, queremos prever preços de voos futuros "
+        "que ainda não aconteceram. O conjunto de teste representa exatamente isso."
+    )
 
     try:
         raw_test = load_raw(test_path)
         X_test   = preprocess_test(raw_test, preprocessor, features)
 
-        with st.spinner("Gerando previsões..."):
+        with st.spinner("⏳ Gerando previsões..."):
             baseline_models_test = train_all_baseline(X_train, y_train, X_valid, y_valid)
             best_name  = results_df.iloc[0]["Modelo"] if "results_df" in dir() else "XGBoost"
             best_model = baseline_models_test.get(best_name, baseline_models_test["XGBoost"])
             y_pred     = best_model.predict(X_test)
 
         df_out = raw_test.copy()
-        df_out["Price_Predicted"] = np.round(y_pred).astype(int)
+        df_out["Preço Previsto (₹)"] = np.round(y_pred).astype(int)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total de previsões", f"{len(df_out):,}")
-        m2.metric("Preço médio previsto", f"{df_out['Price_Predicted'].mean():,.0f} INR")
-        m3.metric("Preço mediano previsto", f"{df_out['Price_Predicted'].median():,.0f} INR")
+        st.success(f"✅ Modelo usado: **{best_name}** — {len(df_out):,} previsões geradas.")
 
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("✈️ Voos previstos", f"{len(df_out):,}")
+        m2.metric("💰 Preço médio previsto", f"₹ {df_out['Preço Previsto (₹)'].mean():,.0f}")
+        m3.metric("📍 Preço mediano", f"₹ {df_out['Preço Previsto (₹)'].median():,.0f}")
+        m4.metric("📊 Faixa de preços",
+                  f"₹ {df_out['Preço Previsto (₹)'].min():,.0f} – {df_out['Preço Previsto (₹)'].max():,.0f}")
+
+        st.subheader("Como os preços previstos se distribuem?")
+        st.caption("A forma deste gráfico deve ser parecida com a distribuição dos dados de treino — isso indica que o modelo generalizou bem.")
         fig_pred = px.histogram(
-            df_out, x="Price_Predicted", nbins=60,
-            labels={"Price_Predicted": "Preço Previsto (INR)"},
-            color_discrete_sequence=["steelblue"],
-            title=f"Distribuição dos preços previstos — {best_name}",
+            df_out, x="Preço Previsto (₹)", nbins=60,
+            color_discrete_sequence=["#4C9BE8"],
+            labels={"Preço Previsto (₹)": "Preço previsto (₹)", "count": "Nº de voos"},
         )
+        fig_pred.update_layout(yaxis_title="Número de voos", margin=dict(t=10))
         st.plotly_chart(fig_pred, use_container_width=True)
 
         st.subheader("Amostra das previsões")
-        show_cols = ["Airline", "Source", "Destination", "Total_Stops", "Price_Predicted"]
-        st.dataframe(df_out[show_cols].head(20), use_container_width=True)
+        st.caption("Os 20 primeiros voos do conjunto de teste com o preço previsto pelo modelo.")
+        display_cols = {
+            "Airline": "Companhia",
+            "Source": "Origem",
+            "Destination": "Destino",
+            "Total_Stops": "Escalas",
+            "Preço Previsto (₹)": "Preço Previsto (₹)",
+        }
+        df_display = df_out[list(display_cols.keys())].rename(columns=display_cols).head(20)
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
 
+        st.divider()
         csv = df_out.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Baixar predictions_test_set.csv",
+            "⬇️ Baixar todas as previsões (CSV)",
             data=csv,
             file_name="predictions_test_set.csv",
             mime="text/csv",
+            help="Arquivo com os 2.671 voos e seus preços previstos.",
         )
 
     except FileNotFoundError:
-        st.warning(f"Arquivo `{test_path}` não encontrado. Verifique o caminho na barra lateral.")
+        st.warning(
+            f"⚠️ O arquivo `{test_path}` não foi encontrado. "
+            "Verifique o nome do arquivo na barra lateral."
+        )
     except Exception as e:
-        st.error(f"Erro ao gerar previsões: {e}")
+        st.error(f"❌ Erro ao gerar previsões: {e}")
